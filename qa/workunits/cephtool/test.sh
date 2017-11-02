@@ -2162,9 +2162,12 @@ function test_mon_osd_erasure_code()
   ceph osd erasure-code-profile set fooprofile a=b c=d e=f --force
   ceph osd erasure-code-profile set fooprofile a=b c=d e=f
   expect_false ceph osd erasure-code-profile set fooprofile a=b c=d e=f g=h
-  #
-  # cleanup by removing profile 'fooprofile'
+  # make sure ruleset-foo doesn't work anymore
+  expect_false ceph osd erasure-code-profile set barprofile ruleset-failure-domain=host
+  ceph osd erasure-code-profile set barprofile crush-failure-domain=host
+  # clean up
   ceph osd erasure-code-profile rm fooprofile
+  ceph osd erasure-code-profile rm barprofile
 }
 
 function test_mon_osd_misc()
@@ -2385,6 +2388,9 @@ function test_mon_pool_application()
   ceph osd pool application set app_for_test rbd key1 value1
   ceph osd pool application set app_for_test rbd key2 value2
   ceph osd pool application set app_for_test rgw key1 value1
+  ceph osd pool application get app_for_test rbd key1 | grep 'value1'
+  ceph osd pool application get app_for_test rbd key2 | grep 'value2'
+  ceph osd pool application get app_for_test rgw key1 | grep 'value1'
 
   ceph osd pool ls detail --format=json | grep '"application_metadata":{"rbd":{"key1":"value1","key2":"value2"},"rgw":{"key1":"value1"}}'
 

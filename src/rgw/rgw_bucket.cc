@@ -12,6 +12,7 @@
 
 #include "common/errno.h"
 #include "common/ceph_json.h"
+#include "common/backport14.h"
 #include "rgw_rados.h"
 #include "rgw_acl.h"
 #include "rgw_acl_s3.h"
@@ -105,10 +106,9 @@ int rgw_read_user_buckets(RGWRados * store,
 {
   int ret;
   buckets.clear();
-  string buckets_obj_id;
+  std::string buckets_obj_id;
   rgw_get_buckets_obj(user_id, buckets_obj_id);
   rgw_raw_obj obj(store->get_zone_params().user_uid_pool, buckets_obj_id);
-  list<cls_user_bucket_entry> entries;
 
   bool truncated = false;
   string m = marker;
@@ -120,15 +120,18 @@ int rgw_read_user_buckets(RGWRados * store,
   }
 
   do {
+    std::list<cls_user_bucket_entry> entries;
     ret = store->cls_user_list_buckets(obj, m, end_marker, max - total, entries, &m, &truncated);
-    if (ret == -ENOENT)
+    if (ret == -ENOENT) {
       ret = 0;
+    }
 
-    if (ret < 0)
+    if (ret < 0) {
       return ret;
+    }
 
-    for (const auto& entry : entries) {
-      buckets.add(RGWBucketEnt(user_id, entry));
+    for (auto& entry : entries) {
+      buckets.add(RGWBucketEnt(user_id, std::move(entry)));
       total++;
     }
 
@@ -177,13 +180,19 @@ int rgw_bucket_sync_user_stats(RGWRados *store, const string& tenant_name, const
   return 0;
 }
 
-int rgw_link_bucket(RGWRados *store, const rgw_user& user_id, rgw_bucket& bucket, real_time creation_time, bool update_entrypoint)
+int rgw_link_bucket(RGWRados* const store,
+                    const rgw_user& user_id,
+                    rgw_bucket& bucket,
+                    ceph::real_time creation_time,
+                    std::string placement_rule,
+                    bool update_entrypoint)
 {
   int ret;
   string& tenant_name = bucket.tenant;
   string& bucket_name = bucket.name;
 
   cls_user_bucket_entry new_bucket;
+  new_bucket.placement_rule = placement_rule;
 
   RGWBucketEntryPoint ep;
   RGWObjVersionTracker ot;
@@ -475,7 +484,9 @@ void check_bad_user_bucket_mapping(RGWRados *store, const rgw_user& user_id,
         cout << "bucket info mismatch: expected " << actual_bucket << " got " << bucket << std::endl;
         if (fix) {
           cout << "fixing" << std::endl;
-          r = rgw_link_bucket(store, user_id, actual_bucket, bucket_info.creation_time);
+          r = rgw_link_bucket(store, user_id, actual_bucket,
+                              bucket_info.creation_time,
+                              bucket_info.placement_rule);
           if (r < 0) {
             cerr << "failed to fix bucket: " << cpp_strerror(-r) << std::endl;
           }
@@ -892,7 +903,8 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state, std::string *err_msg)
       return r;
     }
 
-    r = rgw_link_bucket(store, user_info.user_id, bucket_info.bucket, real_time());
+    r = rgw_link_bucket(store, user_info.user_id, bucket_info.bucket,
+                        ceph::real_time(), bucket_info.placement_rule);
     if (r < 0) {
       return r;
     }
@@ -2118,9 +2130,18 @@ public:
 
     /* link bucket */
     if (be.linked) {
-      ret = rgw_link_bucket(store, be.owner, be.bucket, be.creation_time, false);
+      RGWObjectCtx ctx(store);
+      RGWBucketInfo bucket_info;
+      ret = store->get_bucket_info(ctx, tenant_name, bucket_name,
+                                   bucket_info, nullptr, nullptr);
+      if (ret < 0) {
+        return ret;
+      }
+      ret = rgw_link_bucket(store, be.owner, be.bucket, be.creation_time,
+                            bucket_info.placement_rule, false);
     } else {
-      ret = rgw_unlink_bucket(store, be.owner, be.bucket.tenant, be.bucket.name, false);
+      ret = rgw_unlink_bucket(store, be.owner, be.bucket.tenant,
+                              be.bucket.name, false);
     }
 
     return ret;
@@ -2164,13 +2185,17 @@ public:
     pool = store->get_zone_params().domain_root;
   }
 
-  int list_keys_init(RGWRados *store, void **phandle) override
-  {
-    list_keys_info *info = new list_keys_info;
+  int list_keys_init(RGWRados *store, const string& marker, void **phandle) override {
+    auto info = ceph::make_unique<list_keys_info>();
 
     info->store = store;
 
-    *phandle = (void *)info;
+    int ret = store->list_raw_objects_init(store->get_zone_params().domain_root, marker,
+                                           &info->ctx);
+    if (ret < 0) {
+      return ret;
+    }
+    *phandle = (void *)info.release();
 
     return 0;
   }
@@ -2186,8 +2211,8 @@ public:
 
     list<string> unfiltered_keys;
 
-    int ret = store->list_raw_objects(store->get_zone_params().domain_root, no_filter,
-                                      max, info->ctx, unfiltered_keys, truncated);
+    int ret = store->list_raw_objects_next(no_filter, max, info->ctx,
+                                           unfiltered_keys, truncated);
     if (ret < 0 && ret != -ENOENT)
       return ret;
     if (ret == -ENOENT) {
@@ -2212,6 +2237,11 @@ public:
   void list_keys_complete(void *handle) override {
     list_keys_info *info = static_cast<list_keys_info *>(handle);
     delete info;
+  }
+
+  string get_marker(void *handle) {
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
+    return info->store->list_raw_objs_get_cursor(info->ctx);
   }
 };
 
@@ -2354,13 +2384,17 @@ public:
     pool = store->get_zone_params().domain_root;
   }
 
-  int list_keys_init(RGWRados *store, void **phandle) override
-  {
-    list_keys_info *info = new list_keys_info;
+  int list_keys_init(RGWRados *store, const string& marker, void **phandle) override {
+    auto info = ceph::make_unique<list_keys_info>();
 
     info->store = store;
 
-    *phandle = (void *)info;
+    int ret = store->list_raw_objects_init(store->get_zone_params().domain_root, marker,
+                                           &info->ctx);
+    if (ret < 0) {
+      return ret;
+    }
+    *phandle = (void *)info.release();
 
     return 0;
   }
@@ -2376,8 +2410,8 @@ public:
 
     list<string> unfiltered_keys;
 
-    int ret = store->list_raw_objects(store->get_zone_params().domain_root, no_filter,
-                                      max, info->ctx, unfiltered_keys, truncated);
+    int ret = store->list_raw_objects_next(no_filter, max, info->ctx,
+                                           unfiltered_keys, truncated);
     if (ret < 0 && ret != -ENOENT)
       return ret;
     if (ret == -ENOENT) {
@@ -2405,6 +2439,11 @@ public:
   void list_keys_complete(void *handle) override {
     list_keys_info *info = static_cast<list_keys_info *>(handle);
     delete info;
+  }
+
+  string get_marker(void *handle) {
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
+    return info->store->list_raw_objs_get_cursor(info->ctx);
   }
 
   /*

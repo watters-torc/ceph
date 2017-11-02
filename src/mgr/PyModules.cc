@@ -119,10 +119,15 @@ PyObject *PyModules::list_servers_python()
 
 PyObject *PyModules::get_metadata_python(
   std::string const &handle,
-  const std::string &svc_name,
+  const std::string &svc_type,
   const std::string &svc_id)
 {
-  auto metadata = daemon_state.get(DaemonKey(svc_name, svc_id));
+  auto metadata = daemon_state.get(DaemonKey(svc_type, svc_id));
+  if (metadata == nullptr) {
+    derr << "Requested missing service " << svc_type << "." << svc_id << dendl;
+    Py_RETURN_NONE;
+  }
+
   Mutex::Locker l(metadata->lock);
   PyFormatter f;
   f.dump_string("hostname", metadata->hostname);
@@ -135,10 +140,15 @@ PyObject *PyModules::get_metadata_python(
 
 PyObject *PyModules::get_daemon_status_python(
   std::string const &handle,
-  const std::string &svc_name,
+  const std::string &svc_type,
   const std::string &svc_id)
 {
-  auto metadata = daemon_state.get(DaemonKey(svc_name, svc_id));
+  auto metadata = daemon_state.get(DaemonKey(svc_type, svc_id));
+  if (metadata == nullptr) {
+    derr << "Requested missing service " << svc_type << "." << svc_id << dendl;
+    Py_RETURN_NONE;
+  }
+
   Mutex::Locker l(metadata->lock);
   PyFormatter f;
   for (const auto &i : metadata->service_status) {
@@ -679,9 +689,8 @@ PyObject* PyModules::get_counter_python(
   f.open_array_section(path.c_str());
 
   auto metadata = daemon_state.get(DaemonKey(svc_name, svc_id));
-
-  Mutex::Locker l2(metadata->lock);
   if (metadata) {
+    Mutex::Locker l2(metadata->lock);
     if (metadata->perf_counters.instances.count(path)) {
       auto counter_instance = metadata->perf_counters.instances.at(path);
       const auto &data = counter_instance.get_data();
@@ -726,8 +735,9 @@ PyObject* PyModules::get_perf_schema_python(
   } else {
     auto key = DaemonKey(svc_type, svc_id);
     // so that the below can be a loop in all cases
-    if (daemon_state.exists(key)) {
-      states[key] = daemon_state.get(key);
+    auto got = daemon_state.get(key);
+    if (got != nullptr) {
+      states[key] = got;
     }
   }
 

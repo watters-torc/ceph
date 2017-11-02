@@ -105,7 +105,8 @@ struct MockImageCtx {
       mirroring_resync_after_disconnect(
           image_ctx.mirroring_resync_after_disconnect),
       mirroring_replay_delay(image_ctx.mirroring_replay_delay),
-      non_blocking_aio(image_ctx.non_blocking_aio)
+      non_blocking_aio(image_ctx.non_blocking_aio),
+      blkin_trace_all(image_ctx.blkin_trace_all)
   {
     md_ctx.dup(image_ctx.md_ctx);
     data_ctx.dup(image_ctx.data_ctx);
@@ -155,6 +156,8 @@ struct MockImageCtx {
 					     cls::rbd::SnapshotNamespace *out_snap_namespace));
   MOCK_CONST_METHOD2(get_parent_spec, int(librados::snap_t in_snap_id,
                                           ParentSpec *pspec));
+  MOCK_CONST_METHOD2(get_parent_overlap, int(librados::snap_t in_snap_id,
+                                             uint64_t *overlap));
 
   MOCK_CONST_METHOD2(is_snap_protected, int(librados::snap_t in_snap_id,
                                             bool *is_protected));
@@ -202,6 +205,9 @@ struct MockImageCtx {
                                          size_t, uint64_t, Context *, int, ZTracer::Trace *));
   MOCK_METHOD8(write_to_cache, void(object_t, const bufferlist&, size_t,
                                     uint64_t, Context *, int, uint64_t, ZTracer::Trace *));
+
+  MOCK_CONST_METHOD0(get_stripe_count, uint64_t());
+  MOCK_CONST_METHOD0(get_stripe_period, uint64_t());
 
   ImageCtx *image_ctx;
   CephContext *cct;
@@ -297,6 +303,7 @@ struct MockImageCtx {
   bool mirroring_resync_after_disconnect;
   int mirroring_replay_delay;
   bool non_blocking_aio;
+  bool blkin_trace_all;
 };
 
 } // namespace librbd

@@ -1144,6 +1144,8 @@ public:
     return ret;
   }
 
+  void request_osdmap_update(epoch_t e);
+
   // -- stopping --
   Mutex is_stopping_lock;
   Cond is_stopping_cond;
@@ -1454,6 +1456,9 @@ private:
    */
   void osdmap_subscribe(version_t epoch, bool force_request);
   /** @} monc helpers */
+
+  Mutex osdmap_subscribe_lock;
+  epoch_t latest_subscribed_epoch{0};
 
   // -- heartbeat --
   /// information about a heartbeat peer
@@ -2402,7 +2407,8 @@ private:
   int update_crush_device_class();
   int update_crush_location();
 
-  static int write_meta(ObjectStore *store,
+  static int write_meta(CephContext *cct,
+			ObjectStore *store,
 			uuid_d& cluster_fsid, uuid_d& osd_fsid, int whoami);
 
   void handle_pg_scrub(struct MOSDScrub *m, PG* pg);

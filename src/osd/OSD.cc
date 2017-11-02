@@ -247,9 +247,9 @@ OSDService::OSDService(OSD *osd) :
   recovery_sleep_lock("OSDService::recovery_sleep_lock"),
   recovery_sleep_timer(cct, recovery_sleep_lock, false),
   reserver_finisher(cct),
-  local_reserver(&reserver_finisher, cct->_conf->osd_max_backfills,
+  local_reserver(cct, &reserver_finisher, cct->_conf->osd_max_backfills,
 		 cct->_conf->osd_min_recovery_priority),
-  remote_reserver(&reserver_finisher, cct->_conf->osd_max_backfills,
+  remote_reserver(cct, &reserver_finisher, cct->_conf->osd_max_backfills,
 		  cct->_conf->osd_min_recovery_priority),
   pg_temp_lock("OSDService::pg_temp_lock"),
   snap_sleep_lock("OSDService::snap_sleep_lock"),
@@ -258,7 +258,7 @@ OSDService::OSDService(OSD *osd) :
   scrub_sleep_lock("OSDService::scrub_sleep_lock"),
   scrub_sleep_timer(
     osd->client_messenger->cct, scrub_sleep_lock, false /* relax locking */),
-  snap_reserver(&reserver_finisher,
+  snap_reserver(cct, &reserver_finisher,
 		cct->_conf->osd_max_trimming_pgs),
   recovery_lock("OSDService::recovery_lock"),
   recovery_ops_active(0),
@@ -583,6 +583,11 @@ void OSDService::activate_map()
     osd->is_active();
   agent_cond.Signal();
   agent_lock.Unlock();
+}
+
+void OSDService::request_osdmap_update(epoch_t e)
+{
+  osd->osdmap_subscribe(e, false);
 }
 
 class AgentTimeoutCB : public Context {
@@ -1784,7 +1789,7 @@ int OSD::mkfs(CephContext *cct, ObjectStore *store, const string &dev,
     waiter.wait();
   }
 
-  ret = write_meta(store, sb.cluster_fsid, sb.osd_fsid, whoami);
+  ret = write_meta(cct, store, sb.cluster_fsid, sb.osd_fsid, whoami);
   if (ret) {
     derr << "OSD::mkfs: failed to write fsid file: error "
          << cpp_strerror(ret) << dendl;
@@ -1798,7 +1803,7 @@ free_store:
   return ret;
 }
 
-int OSD::write_meta(ObjectStore *store, uuid_d& cluster_fsid, uuid_d& osd_fsid, int whoami)
+int OSD::write_meta(CephContext *cct, ObjectStore *store, uuid_d& cluster_fsid, uuid_d& osd_fsid, int whoami)
 {
   char val[80];
   int r;
@@ -1817,6 +1822,14 @@ int OSD::write_meta(ObjectStore *store, uuid_d& cluster_fsid, uuid_d& osd_fsid, 
   r = store->write_meta("ceph_fsid", val);
   if (r < 0)
     return r;
+
+  string key = cct->_conf->get_val<string>("key");
+  lderr(cct) << "key " << key << dendl;
+  if (key.size()) {
+    r = store->write_meta("osd_key", key);
+    if (r < 0)
+      return r;
+  }
 
   r = store->write_meta("ready", "ready");
   if (r < 0)
@@ -1913,6 +1926,7 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
   disk_tp(cct, "OSD::disk_tp", "tp_osd_disk", cct->_conf->osd_disk_threads, "osd_disk_threads"),
   command_tp(cct, "OSD::command_tp", "tp_osd_cmd",  1),
   session_waiting_lock("OSD::session_waiting_lock"),
+  osdmap_subscribe_lock("OSD::osdmap_subscribe_lock"),
   heartbeat_lock("OSD::heartbeat_lock"),
   heartbeat_stop(false),
   heartbeat_need_update(true),
@@ -3244,11 +3258,14 @@ int OSD::shutdown()
   set_state(STATE_STOPPING);
 
   // Debugging
-  cct->_conf->set_val("debug_osd", "100");
-  cct->_conf->set_val("debug_journal", "100");
-  cct->_conf->set_val("debug_filestore", "100");
-  cct->_conf->set_val("debug_ms", "100");
-  cct->_conf->apply_changes(NULL);
+  if (cct->_conf->get_val<bool>("osd_debug_shutdown")) {
+    cct->_conf->set_val("debug_osd", "100");
+    cct->_conf->set_val("debug_journal", "100");
+    cct->_conf->set_val("debug_filestore", "100");
+    cct->_conf->set_val("debug_bluestore", "100");
+    cct->_conf->set_val("debug_ms", "100");
+    cct->_conf->apply_changes(NULL);
+  }
 
   // stop MgrClient earlier as it's more like an internal consumer of OSD
   mgrc.shutdown();
@@ -4441,17 +4458,21 @@ void OSD::build_initial_pg_history(
       &debug);
     if (new_interval) {
       h->same_interval_since = e;
-    }
-    if (up != new_up) {
-      h->same_up_since = e;
-    }
-    if (acting_primary != new_acting_primary) {
-      h->same_primary_since = e;
-    }
-    if (pgid.pgid.is_split(lastmap->get_pg_num(pgid.pgid.pool()),
-			   osdmap->get_pg_num(pgid.pgid.pool()),
-			   nullptr)) {
-      h->last_epoch_split = e;
+      if (up != new_up) {
+        h->same_up_since = e;
+      }
+      if (acting_primary != new_acting_primary) {
+        h->same_primary_since = e;
+      }
+      if (pgid.pgid.is_split(lastmap->get_pg_num(pgid.pgid.pool()),
+                             osdmap->get_pg_num(pgid.pgid.pool()),
+                             nullptr)) {
+        h->last_epoch_split = e;
+      }
+      up = new_up;
+      acting = new_acting;
+      up_primary = new_up_primary;
+      acting_primary = new_acting_primary;
     }
     lastmap = osdmap;
   }
@@ -5785,6 +5806,9 @@ void OSD::start_waiting_for_healthy()
   dout(1) << "start_waiting_for_healthy" << dendl;
   set_state(STATE_WAITING_FOR_HEALTHY);
   last_heartbeat_resample = utime_t();
+
+  // subscribe to osdmap updates, in case our peers really are known to be dead
+  osdmap_subscribe(osdmap->get_epoch() + 1, false);
 }
 
 bool OSD::_is_healthy()
@@ -7482,9 +7506,11 @@ struct C_OnMapApply : public Context {
 
 void OSD::osdmap_subscribe(version_t epoch, bool force_request)
 {
-  OSDMapRef osdmap = service.get_osdmap();
-  if (osdmap->get_epoch() >= epoch)
+  Mutex::Locker l(osdmap_subscribe_lock);
+  if (latest_subscribed_epoch >= epoch && !force_request)
     return;
+
+  latest_subscribed_epoch = MAX(epoch, latest_subscribed_epoch);
 
   if (monc->sub_want_increment("osdmap", epoch, CEPH_SUBSCRIBE_ONETIME) ||
       force_request) {
@@ -8156,6 +8182,15 @@ void OSD::consume_map()
   assert(osd_lock.is_locked());
   dout(7) << "consume_map version " << osdmap->get_epoch() << dendl;
 
+  /** make sure the cluster is speaking in SORTBITWISE, because we don't
+   *  speak the older sorting version any more. Be careful not to force
+   *  a shutdown if we are merely processing old maps, though.
+   */
+  if (!osdmap->test_flag(CEPH_OSDMAP_SORTBITWISE) && is_active()) {
+    derr << __func__ << " SORTBITWISE flag is not set" << dendl;
+    ceph_abort();
+  }
+
   int num_pg_primary = 0, num_pg_replica = 0, num_pg_stray = 0;
   list<PGRef> to_remove;
 
@@ -8236,11 +8271,6 @@ void OSD::activate_map()
   assert(osd_lock.is_locked());
 
   dout(7) << "activate_map version " << osdmap->get_epoch() << dendl;
-
-  if (!osdmap->test_flag(CEPH_OSDMAP_SORTBITWISE)) {
-    derr << __func__ << " SORTBITWISE flag is not set" << dendl;
-    ceph_abort();
-  }
 
   if (osdmap->test_flag(CEPH_OSDMAP_FULL)) {
     dout(10) << " osdmap flagged full, doing onetime osdmap subscribe" << dendl;
@@ -8908,6 +8938,8 @@ void OSD::handle_pg_backfill_reserve(OpRequestRef op)
 	m->query_epoch,
 	PG::RemoteBackfillReserved()));
   } else if (m->type == MBackfillReserve::REJECT) {
+    // NOTE: this is replica -> primary "i reject your request"
+    //      and also primary -> replica "cancel my previously-granted request"
     evt = PG::CephPeeringEvtRef(
       new PG::CephPeeringEvt(
 	m->query_epoch,
@@ -9300,7 +9332,7 @@ void OSDService::adjust_pg_priorities(const vector<PGRef>& pgs, int newflags)
       i->lock();
       int pgstate = i->get_state();
       if ( ((newstate == PG_STATE_FORCED_RECOVERY) && (pgstate & (PG_STATE_DEGRADED | PG_STATE_RECOVERY_WAIT | PG_STATE_RECOVERING))) ||
-	    ((newstate == PG_STATE_FORCED_BACKFILL) && (pgstate & (PG_STATE_DEGRADED | PG_STATE_BACKFILL_WAIT | PG_STATE_BACKFILL))) )
+	    ((newstate == PG_STATE_FORCED_BACKFILL) && (pgstate & (PG_STATE_DEGRADED | PG_STATE_BACKFILL_WAIT | PG_STATE_BACKFILLING))) )
         i->_change_recovery_force_mode(newstate, false);
       i->unlock();
     }
@@ -9385,18 +9417,18 @@ void OSD::do_recovery(
       pg->discover_all_missing(*rctx.query_map);
       if (rctx.query_map->empty()) {
 	string action;
-        if (pg->state_test(PG_STATE_BACKFILL)) {
+        if (pg->state_test(PG_STATE_BACKFILLING)) {
 	  auto evt = PG::CephPeeringEvtRef(new PG::CephPeeringEvt(
 	    queued,
 	    queued,
-	    PG::CancelBackfill()));
+	    PG::DeferBackfill(cct->_conf->osd_recovery_retry_interval)));
 	  pg->queue_peering_event(evt);
 	  action = "in backfill";
         } else if (pg->state_test(PG_STATE_RECOVERING)) {
 	  auto evt = PG::CephPeeringEvtRef(new PG::CephPeeringEvt(
 	    queued,
 	    queued,
-	    PG::CancelRecovery()));
+	    PG::DeferRecovery(cct->_conf->osd_recovery_retry_interval)));
 	  pg->queue_peering_event(evt);
 	  action = "in recovery";
 	} else {

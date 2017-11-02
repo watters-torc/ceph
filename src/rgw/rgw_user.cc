@@ -11,6 +11,7 @@
 #include "common/Formatter.h"
 #include "common/ceph_json.h"
 #include "common/RWLock.h"
+#include "common/backport14.h"
 #include "rgw_rados.h"
 #include "rgw_acl.h"
 
@@ -1759,7 +1760,7 @@ int RGWUser::init(RGWUserAdminOpState& op_state)
 {
   bool found = false;
   std::string swift_user;
-  rgw_user& uid = op_state.get_user_id();
+  user_id = op_state.get_user_id();
   std::string user_email = op_state.get_user_email();
   std::string access_key = op_state.get_access_key();
   std::string subuser = op_state.get_subuser();
@@ -1774,16 +1775,16 @@ int RGWUser::init(RGWUserAdminOpState& op_state)
 
   clear_populated();
 
-  if (uid.empty() && !subuser.empty()) {
+  if (user_id.empty() && !subuser.empty()) {
     size_t pos = subuser.find(':');
     if (pos != string::npos) {
-      uid = subuser.substr(0, pos);
-      op_state.set_user_id(uid);
+      user_id = subuser.substr(0, pos);
+      op_state.set_user_id(user_id);
     }
   }
 
-  if (!uid.empty() && (uid.compare(RGW_USER_ANON_ID) != 0)) {
-    found = (rgw_get_user_info_by_uid(store, uid, user_info, &op_state.objv) >= 0);
+  if (!user_id.empty() && (user_id.compare(RGW_USER_ANON_ID) != 0)) {
+    found = (rgw_get_user_info_by_uid(store, user_id, user_info, &op_state.objv) >= 0);
     op_state.found_by_uid = found;
   }
   if (!user_email.empty() && !found) {
@@ -1808,7 +1809,9 @@ int RGWUser::init(RGWUserAdminOpState& op_state)
     set_populated();
   }
 
-  user_id = user_info.user_id;
+  if (user_id.empty()) {
+    user_id = user_info.user_id;
+  }
   op_state.set_initialized();
 
   // this may have been called by a helper object
@@ -2772,13 +2775,19 @@ public:
     pool = store->get_zone_params().user_uid_pool;
   }
 
-  int list_keys_init(RGWRados *store, void **phandle) override
+  int list_keys_init(RGWRados *store, const string& marker, void **phandle) override
   {
-    list_keys_info *info = new list_keys_info;
+    auto info = ceph::make_unique<list_keys_info>();
 
     info->store = store;
 
-    *phandle = (void *)info;
+    int ret = store->list_raw_objects_init(store->get_zone_params().user_uid_pool, marker,
+                                           &info->ctx);
+    if (ret < 0) {
+      return ret;
+    }
+
+    *phandle = (void *)info.release();
 
     return 0;
   }
@@ -2794,8 +2803,8 @@ public:
 
     list<string> unfiltered_keys;
 
-    int ret = store->list_raw_objects(store->get_zone_params().user_uid_pool, no_filter,
-                                      max, info->ctx, unfiltered_keys, truncated);
+    int ret = store->list_raw_objects_next(no_filter, max, info->ctx,
+                                           unfiltered_keys, truncated);
     if (ret < 0 && ret != -ENOENT)
       return ret;		        
     if (ret == -ENOENT) {
@@ -2820,6 +2829,11 @@ public:
   void list_keys_complete(void *handle) override {
     list_keys_info *info = static_cast<list_keys_info *>(handle);
     delete info;
+  }
+
+  string get_marker(void *handle) {
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
+    return info->store->list_raw_objs_get_cursor(info->ctx);
   }
 };
 

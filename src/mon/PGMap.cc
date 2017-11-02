@@ -835,7 +835,7 @@ void PGMapDigest::dump_object_stat_sum(
     f->dump_int("kb_used", SHIFT_ROUND_UP(sum.num_bytes, 10));
     f->dump_int("bytes_used", sum.num_bytes);
     f->dump_format_unquoted("percent_used", "%.2f", (used*100));
-    f->dump_unsigned("max_avail", avail);
+    f->dump_unsigned("max_avail", avail / raw_used_rate);
     f->dump_int("objects", sum.num_objects);
     if (verbose) {
       f->dump_int("quota_objects", pool->quota_max_objects);
@@ -850,7 +850,7 @@ void PGMapDigest::dump_object_stat_sum(
   } else {
     tbl << stringify(si_t(sum.num_bytes));
     tbl << percentify(used*100);
-    tbl << si_t(avail);
+    tbl << si_t(avail / raw_used_rate);
     tbl << sum.num_objects;
     if (verbose) {
       tbl << stringify(si_t(sum.num_objects_dirty))
@@ -2936,12 +2936,13 @@ void PGMap::get_health_checks(
   }
 
   // TOO_MANY_PGS
-  if (num_in && cct->_conf->mon_pg_warn_max_per_osd > 0) {
+  int64_t max_pg_per_osd = cct->_conf->get_val<int64_t>("mon_max_pg_per_osd");
+  if (num_in && max_pg_per_osd > 0) {
     int per = sum_pg_up / num_in;
-    if (per > cct->_conf->mon_pg_warn_max_per_osd) {
+    if (per > max_pg_per_osd) {
       ostringstream ss;
       ss << "too many PGs per OSD (" << per
-	 << " > max " << cct->_conf->mon_pg_warn_max_per_osd << ")";
+	 << " > max " << max_pg_per_osd << ")";
       checks->add("TOO_MANY_PGS", HEALTH_WARN, ss.str());
     }
   }
@@ -3326,7 +3327,7 @@ void PGMap::get_health(
       note["incomplete"] += p->second;
     if (p->first & PG_STATE_BACKFILL_WAIT)
       note["backfill_wait"] += p->second;
-    if (p->first & PG_STATE_BACKFILL)
+    if (p->first & PG_STATE_BACKFILLING)
       note["backfilling"] += p->second;
     if (p->first & PG_STATE_BACKFILL_TOOFULL)
       note["backfill_toofull"] += p->second;
@@ -3431,7 +3432,7 @@ void PGMap::get_health(
 	                        PG_STATE_RECOVERY_TOOFULL |
 	                        PG_STATE_INCOMPLETE |
 	                        PG_STATE_BACKFILL_WAIT |
-	                        PG_STATE_BACKFILL |
+	                        PG_STATE_BACKFILLING |
 	                        PG_STATE_BACKFILL_TOOFULL)) &&
 	    stuck_pgs.count(p->first) == 0) {
 	  if (max > 0) {
@@ -3604,11 +3605,13 @@ void PGMap::get_health(
 	detail->push_back(make_pair(HEALTH_WARN, ss.str()));
     }
   }
-  if (num_in && cct->_conf->mon_pg_warn_max_per_osd > 0) {
+  int64_t max_pg_per_osd = cct->_conf->get_val<int64_t>("mon_max_pg_per_osd");
+  if (num_in && max_pg_per_osd > 0) {
     int per = sum_pg_up / num_in;
-    if (per > cct->_conf->mon_pg_warn_max_per_osd) {
+    if (per > max_pg_per_osd) {
       ostringstream ss;
-      ss << "too many PGs per OSD (" << per << " > max " << cct->_conf->mon_pg_warn_max_per_osd << ")";
+      ss << "too many PGs per OSD (" << per << " > max "
+	 << max_pg_per_osd << ")";
       summary.push_back(make_pair(HEALTH_WARN, ss.str()));
       if (detail)
 	detail->push_back(make_pair(HEALTH_WARN, ss.str()));
@@ -3882,13 +3885,13 @@ int process_pg_map_command(
         state = -1;
         break;
       } else {
-        int filter = pg_string_state(state_str);
-        if (filter < 0) {
+        auto filter = pg_string_state(state_str);
+        if (!filter) {
           *ss << "'" << state_str << "' is not a valid pg state,"
               << " available choices: " << pg_state_string(0xFFFFFFFF);
           return -EINVAL;
         }
-        state |= filter;
+        state |= *filter;
       }
 
       states.pop_back();

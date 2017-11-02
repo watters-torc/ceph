@@ -286,6 +286,7 @@ class Thrasher:
                                         pg=pg,
                                         id=exp_osd))
             # export
+            # Can't use new export-remove op since this is part of upgrade testing
             cmd = prefix + "--op export --pgid {pg} --file {file}"
             cmd = cmd.format(id=exp_osd, pg=pg, file=exp_path)
             proc = exp_remote.run(args=cmd)
@@ -294,7 +295,7 @@ class Thrasher:
                                 "export failure with status {ret}".
                                 format(ret=proc.exitstatus))
             # remove
-            cmd = prefix + "--op remove --pgid {pg}"
+            cmd = prefix + "--force --op remove --pgid {pg}"
             cmd = cmd.format(id=exp_osd, pg=pg)
             proc = exp_remote.run(args=cmd)
             if proc.exitstatus:
@@ -767,7 +768,7 @@ class Thrasher:
         osd_debug_skip_full_check_in_backfill_reservation to force
         the more complicated check in do_scan to be exercised.
 
-        Then, verify that all backfills stop.
+        Then, verify that all backfillings stop.
         """
         self.log("injecting backfill full")
         for i in self.live_osds:
@@ -779,13 +780,13 @@ class Thrasher:
                                      check_status=True, timeout=30, stdout=DEVNULL)
         for i in range(30):
             status = self.ceph_manager.compile_pg_status()
-            if 'backfill' not in status.keys():
+            if 'backfilling' not in status.keys():
                 break
             self.log(
-                "waiting for {still_going} backfills".format(
-                    still_going=status.get('backfill')))
+                "waiting for {still_going} backfillings".format(
+                    still_going=status.get('backfilling')))
             time.sleep(1)
-        assert('backfill' not in self.ceph_manager.compile_pg_status().keys())
+        assert('backfilling' not in self.ceph_manager.compile_pg_status().keys())
         for i in self.live_osds:
             self.ceph_manager.set_config(
                 i,
@@ -1031,6 +1032,7 @@ class Thrasher:
                         Scrubber(self.ceph_manager, self.config)
             self.choose_action()()
             time.sleep(delay)
+        self.all_up()
         if self.random_eio > 0:
             self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
                           'injectargs', '--', '--filestore_debug_random_read_err=0.0')
@@ -2042,7 +2044,7 @@ class CephManager:
         for pg in pgs:
             if (pg['state'].count('active') and
                     not pg['state'].count('recover') and
-                    not pg['state'].count('backfill') and
+                    not pg['state'].count('backfilling') and
                     not pg['state'].count('stale')):
                 num += 1
         return num
@@ -2216,6 +2218,8 @@ class CephManager:
                 else:
                     self.log("no progress seen, keeping timeout for now")
                     if now - start >= timeout:
+			if self.is_recovered():
+			    break
                         self.log('dumping pgs')
                         out = self.raw_cluster_cmd('pg', 'dump')
                         self.log(out)
@@ -2367,7 +2371,7 @@ class CephManager:
         time.sleep(2)
         self.ctx.daemons.get_daemon('osd', osd, self.cluster).stop()
 
-    def revive_osd(self, osd, timeout=150, skip_admin_check=False):
+    def revive_osd(self, osd, timeout=360, skip_admin_check=False):
         """
         Revive osds by either power cycling (if indicated by the config)
         or by restarting.

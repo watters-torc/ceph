@@ -540,8 +540,11 @@ set(libcommon_files
   ${auth_files}
   ${mds_files})
 
+CHECK_C_COMPILER_FLAG("-fvar-tracking-assignments" HAS_VTA)
 if(HAS_VTA)
-  set_source_files_properties(common/config.cc
+  set_source_files_properties(
+    common/config.cc
+    common/options.cc
     PROPERTIES COMPILE_FLAGS -fno-var-tracking-assignments)
 endif()
 
@@ -726,7 +729,6 @@ add_subdirectory(ceph-volume)
 add_subdirectory(ceph-detect-init)
 
 ## dencoder
-CHECK_C_COMPILER_FLAG("-fvar-tracking-assignments" HAS_VTA)
 if(HAS_VTA)
   set_source_files_properties(test/encoding/ceph_dencoder.cc
     PROPERTIES COMPILE_FLAGS -fno-var-tracking-assignments)
@@ -811,13 +813,8 @@ if (NOT WITH_SYSTEM_ROCKSDB)
     list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
   endif(WITH_CCACHE AND CCACHE_FOUND)
 
-  # We really want to have the CRC32 calculation in RocksDB accelerated
-  # with SSE 4.2. For details refer to rocksdb/util/crc32c.cc.
-  if (HAVE_INTEL_SSE4_2)
-    list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_FLAGS=${SIMD_COMPILE_FLAGS})
-  else()
-    list(APPEND ROCKSDB_CMAKE_ARGS -DWITH_SSE42=OFF)
-  endif()
+  # SSE 4.2 is enabled by default in rocksdb's crc32c. For details refer to
+  # rocksdb/util/crc32c.cc.
   list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_AR=${CMAKE_AR})
   list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
 

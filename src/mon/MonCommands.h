@@ -548,6 +548,9 @@ COMMAND("osd crush add " \
 	"name=args,type=CephString,n=N,goodchars=[A-Za-z0-9-_.=]", \
 	"add or update crushmap position and weight for <name> with <weight> and location <args>", \
 	"osd", "rw", "cli,rest")
+COMMAND("osd crush set-all-straw-buckets-to-straw2",
+        "convert all CRUSH current straw buckets to use the straw2 algorithm",
+	"osd", "rw", "cli,rest")
 COMMAND("osd crush set-device-class " \
         "name=class,type=CephString " \
 	"name=ids,type=CephString,n=N", \
@@ -739,13 +742,15 @@ COMMAND("osd erasure-code-profile ls", \
 	"list all erasure code profiles", \
 	"osd", "r", "cli,rest")
 COMMAND("osd set " \
-	"name=key,type=CephChoices,strings=full|pause|noup|nodown|noout|noin|nobackfill|norebalance|norecover|noscrub|nodeep-scrub|notieragent|sortbitwise|recovery_deletes|require_jewel_osds|require_kraken_osds", \
+	"name=key,type=CephChoices,strings=full|pause|noup|nodown|noout|noin|nobackfill|norebalance|norecover|noscrub|nodeep-scrub|notieragent|sortbitwise|recovery_deletes|require_jewel_osds|require_kraken_osds " \
+	"name=sure,type=CephChoices,strings=--yes-i-really-mean-it,req=false", \
 	"set <key>", "osd", "rw", "cli,rest")
 COMMAND("osd unset " \
 	"name=key,type=CephChoices,strings=full|pause|noup|nodown|noout|noin|nobackfill|norebalance|norecover|noscrub|nodeep-scrub|notieragent", \
 	"unset <key>", "osd", "rw", "cli,rest")
 COMMAND("osd require-osd-release "\
-	"name=release,type=CephChoices,strings=luminous",
+	"name=release,type=CephChoices,strings=luminous " \
+	"name=sure,type=CephChoices,strings=--yes-i-really-mean-it,req=false", \
 	"set the minimum allowed OSD release to participate in the cluster",
 	"osd", "rw", "cli,rest")
 COMMAND("osd cluster_snap", "take cluster snapshot (disabled)", \
@@ -981,6 +986,12 @@ COMMAND("osd pool application rm " \
         "name=key,type=CephString",
         "removes application <app> metadata key <key> on pool <poolname>",
         "osd", "rw", "cli,rest")
+COMMAND("osd pool application get " \
+        "name=pool,type=CephPoolname,req=fasle " \
+        "name=app,type=CephString,req=false " \
+        "name=key,type=CephString,req=false",
+        "get value of key <key> of application <app> on pool <poolname>",
+        "osd", "r", "cli,rest")
 COMMAND("osd utilization",
 	"get basic pg distribution stats",
 	"osd", "r", "cli,rest")
